@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Leitor de Placas - Demo</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 12px; background: #f6f7fb; color: #111; }
+    header { text-align: center; margin-bottom: 10px; }
+    video, canvas { width: 100%; max-width: 720px; border-radius: 8px; display: block; margin: 0 auto; background: #000; }
+    .controls { display: flex; justify-content: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+    button { padding: 10px 14px; border: none; border-radius: 6px; background: #0b63d6; color: white; font-weight: bold; cursor: pointer; }
+    button[disabled] { opacity: 0.6; cursor: not-allowed; }
+    .results { max-width: 720px; margin: 12px auto; background: #fff; padding: 12px; border-radius: 8px; box-shadow: 0 3px 10px rgba(0,0,0,0.05); }
+    .plate { font-size: 20px; font-weight: 700; color: #0b63d6; margin-top: 6px; }
+    pre { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Leitor de Placas (Demo)</h1>
+    <p><small>Grátis, OCR direto no navegador usando Tesseract.js</small></p>
+  </header>
+
+  <main>
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" style="display:none;"></canvas>
+
+    <div class="controls">
+      <button id="startBtn">Iniciar Câmera</button>
+      <button id="captureBtn" disabled>Capturar e Ler</button>
+      <button id="stopBtn" disabled>Parar</button>
+    </div>
+
+    <div class="results" id="results" style="display:none;">
+      <div id="status">Pronto.</div>
+      <div id="plates"></div>
+      <hr />
+      <div><strong>OCR bruto:</strong></div>
+      <pre id="ocrText"></pre>
+    </div>
+  </main>
+
+  <script src="https://unpkg.com/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
+  <script>
+  (function () {
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const startBtn = document.getElementById('startBtn');
+    const captureBtn = document.getElementById('captureBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusEl = document.getElementById('status');
+    const platesEl = document.getElementById('plates');
+    const ocrTextEl = document.getElementById('ocrText');
+    const resultsBox = document.getElementById('results');
+
+    let stream = null;
+
+    function findPossiblePlates(text) {
+      if (!text) return [];
+      const cleaned = text.toUpperCase().replace(/[^A-Z0-9]/g,' ');
+      const tokens = cleaned.split(/\s+/).filter(Boolean);
+      const candidates = [];
+      tokens.forEach(tok => {
+        const t = tok.replace(/[^A-Z0-9]/g, '');
+        const reOld = /^[A-Z]{3}\d{4}$/;
+        const reMerc = /^[A-Z]{3}\d[A-Z]\d{2}$/;
+        if (reOld.test(t) || reMerc.test(t)) candidates.push(t);
+      });
+      return [...new Set(candidates)];
+    }
+
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        video.srcObject = stream;
+        await video.play();
+        startBtn.disabled = true;
+        captureBtn.disabled = false;
+        stopBtn.disabled = false;
+        statusEl.textContent = 'Câmera ativa. Aponte para a placa e toque em "Capturar e Ler".';
+        resultsBox.style.display = 'none';
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'Erro ao acessar câmera: ' + (err.message || err);
+      }
+    }
+
+    function stopCamera() {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      video.pause();
+      video.srcObject = null;
+      startBtn.disabled = false;
+      captureBtn.disabled = true;
+      stopBtn.disabled = true;
+      statusEl.textContent = 'Câmera parada.';
+    }
+
+    function captureFrame() {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+      return new Promise(resolve => canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.8));
+    }
+
+    async function doOCR(blob) {
+      statusEl.textContent = 'Executando OCR...';
+      const worker = Tesseract.createWorker({
+        logger: m => {
+          if (m.status) statusEl.textContent = `OCR: ${m.status} ${m.progress ? ' - ' + Math.round(m.progress*100) + '%' : ''}`;
+        }
+      });
+      try {
+        await worker.load();
+        await worker.loadLanguage('por+eng');
+        await worker.initialize('por+eng');
+        const { data } = await worker.recognize(blob, { tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK });
+        await worker.terminate();
+        return data;
+      } catch (err) {
+        await worker.terminate();
+        throw err;
+      }
+    }
+
+    captureBtn.addEventListener('click', async () => {
+      captureBtn.disabled = true;
+      resultsBox.style.display = 'none';
+      platesEl.innerHTML = '';
+      ocrTextEl.textContent = '';
+      try {
+        const blob = await captureFrame();
+        const data = await doOCR(blob);
+        const raw = data.text || '';
+        ocrTextEl.textContent = raw.trim() || '[nenhum texto reconhecido]';
+        const possible = findPossiblePlates(raw);
+        if (possible.length) {
+          platesEl.innerHTML = possible.map(p => `<div class="plate">${p}</div>`).join('');
+          statusEl.textContent = `Foram encontradas ${possible.length} placa(s) possível(is).`;
+        } else {
+          platesEl.innerHTML = '<div><small>Nenhuma placa detectada.</small></div>';
+          statusEl.textContent = 'Nenhuma placa detectada. Tente outra foto.';
+        }
+        resultsBox.style.display = 'block';
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'Erro durante OCR: ' + (err.message || err);
+        resultsBox.style.display = 'block';
+      } finally {
+        captureBtn.disabled = false;
+      }
+    });
+
+    startBtn.addEventListener('click', startCamera);
+    stopBtn.addEventListener('click', stopCamera);
+  })();
+  </script>
+</body>
+</html>
